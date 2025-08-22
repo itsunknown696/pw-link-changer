@@ -1,138 +1,63 @@
+from pyrogram import Client, filters
+import fitz  # PyMuPDF for PDF processing
 import os
-import logging
-from telegram import Update, ReplyKeyboardRemove
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    ConversationHandler,
-    CallbackContext,
-)
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# ====== BOT CONFIG ======
+API_ID = 27238809
+API_HASH = "c854867f7b27f65aebd41392eb2af1d9"
+BOT_TOKEN = "7782085620:AAGKaPWPtJGMzLkcjcMMxcRNCzTJAdOHtOY"
 
-# States
-WAITING_FOR_FILE, WAITING_FOR_TOKEN = range(2)
+app = Client("pdf_split_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-def start(update: Update, context: CallbackContext) -> int:
-    """Send a message when the command /start is issued."""
-    update.message.reply_text(
-        "📁 Send me a text file with MPD links in the format:\n"
-        "name:link\n\n"
-        "I'll convert them to the PW Player format.\n"
-        "Note: Names can contain colons, I'll handle them properly!",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    return WAITING_FOR_FILE
 
-def handle_file(update: Update, context: CallbackContext) -> int:
-    """Handle the document and ask for token."""
-    if not update.message.document.mime_type == 'text/plain':
-        update.message.reply_text("❌ Please send a text file (.txt)")
-        return WAITING_FOR_FILE
-    
-    # Download the file
-    file = context.bot.get_file(update.message.document.file_id)
-    file_path = f"temp_{update.message.from_user.id}.txt"
-    file.download(file_path)
-    
-    context.user_data['file_path'] = file_path
-    update.message.reply_text("🔑 Now please send me your PW token:")
-    return WAITING_FOR_TOKEN
+@app.on_message(filters.document & filters.private)
+async def split_pdf(client, message):
+    if not message.document.file_name.endswith(".pdf"):
+        await message.reply_text("❌ Please send a PDF file only.")
+        return
 
-def handle_token(update: Update, context: CallbackContext) -> int:
-    """Process the file with the provided token."""
-    token = update.message.text.strip()
-    file_path = context.user_data.get('file_path')
-    
-    if not file_path or not os.path.exists(file_path):
-        update.message.reply_text("❌ Error: File not found. Please start over.")
-        return ConversationHandler.END
-    
+    # Download PDF
+    file_path = await message.download()
+    await message.reply_text("📥 Downloaded! Now splitting the PDF...")
+
     try:
-        with open(file_path, 'r') as f:
-            content = f.read()
-        
-        converted_lines = []
-        for line in content.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Split on LAST colon only
-            if ':' in line:
-                *name_parts, url = line.rsplit(':', 1)
-                name_part = ':'.join(name_parts).strip()
-                url = url.strip()
-                
-                if url.endswith('.mpd'):
-                    converted_url = (
-                        f"https://anonymouspwplayerr-f996115ea61a.herokuapp.com/"
-                        f"pw?url={url}&token={token}"
-                    )
-                    converted_lines.append(f"{name_part}:{converted_url}")
-                else:
-                    converted_lines.append(line)
-            else:
-                converted_lines.append(line)
-        
-        # Create output file
-        output_path = f"converted_{update.message.from_user.id}.txt"
-        with open(output_path, 'w') as f:
-            f.write('\n'.join(converted_lines))
-        
-        # Send back the converted file
-        with open(output_path, 'rb') as f:
-            update.message.reply_document(
-                document=f,
-                caption="✅ Here's your converted file!",
-                reply_markup=ReplyKeyboardRemove()
+        # Open PDF
+        doc = fitz.open(file_path)
+
+        for page_num in range(len(doc)):
+            # Extract each page
+            pdf_writer = fitz.open()
+            pdf_writer.insert_pdf(doc, from_page=page_num, to_page=page_num)
+
+            out_file = f"page_{page_num+1}.pdf"
+            pdf_writer.save(out_file)
+            pdf_writer.close()
+
+            # Send page back to user
+            await client.send_document(
+                chat_id=message.chat.id,
+                document=out_file,
+                caption=f"📄 Page {page_num+1}"
             )
-            
+
+            os.remove(out_file)
+
+        await message.reply_text("✅ Done! All pages sent.")
+
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        update.message.reply_text("❌ An error occurred while processing the file.")
-    
-    # Clean up
-    for path in [file_path, output_path]:
-        if path and os.path.exists(path):
-            os.remove(path)
-    
-    return ConversationHandler.END
+        await message.reply_text(f"⚠️ Error: {str(e)}")
 
-def cancel(update: Update, context: CallbackContext) -> int:
-    """Cancels and ends the conversation."""
-    update.message.reply_text('❌ Operation cancelled.', reply_markup=ReplyKeyboardRemove())
-    
-    file_path = context.user_data.get('file_path')
-    if file_path and os.path.exists(file_path):
-        os.remove(file_path)
-    
-    return ConversationHandler.END
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
-def main() -> None:
-    """Run the bot."""
-    updater = Updater("7718900835:AAGIrZdH5_XETNUBfV0AqhkQt0UydDvIw-I", use_context=True)
-    dispatcher = updater.dispatcher
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('start', start)],
-        states={
-            WAITING_FOR_FILE: [MessageHandler(Filters.document, handle_file)],
-            WAITING_FOR_TOKEN: [MessageHandler(Filters.text & ~Filters.command, handle_token)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
+@app.on_message(filters.command("start") & filters.private)
+async def start(client, message):
+    await message.reply_text(
+        "👋 Hi! Send me a PDF file and I’ll split it into single-page PDFs."
     )
 
-    dispatcher.add_handler(conv_handler)
-    updater.start_polling()
-    updater.idle()
 
-if __name__ == '__main__':
-    main()
+print("🤖 Bot is running...")
+app.run()
